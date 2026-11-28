@@ -586,13 +586,43 @@ class TestAscFileFormat(ReaderWriterTest):
         self.assertEqual(txrq.arbitration_id, 0x1)
         self.assertFalse(txrq.is_rx)
 
-    def test_read_canoe_7_short_fd_layout_raises_value_error(self):
+    @parameterized.expand(
+        [
+            ("classic_partial", "0.100000 1 1d3 Rx d 8 01 02", 0.3),
+            ("classic_missing", "0.100000 1 1d3 Rx d 8", 0.3),
+            ("fd_missing", "0.100000 CANFD 1 Rx 1d3 1 0 8 8", 0.3),
+            ("fd_partial", "0.100000 CANFD 1 Rx 1d3 1 0 8 8 01 02", 0.3),
+            ("fd_named", "0.100000 CANFD 1 Rx 1d3 FrameName 1 0 8 8 01 02", 0.3),
+            ("canoe_7_short", "0.000000 CANFD 1 1e3 Rx 1 0 d", 0.2),
+        ]
+    )
+    def test_truncated_frame_is_reported_and_following_frame_survives(
+        self, _, broken, final_timestamp
+    ):
+        good = "0.100000 1 123 Rx d 2 01 02"
         stream = StringIO(
-            "base hex timestamps absolute\n" "0.000000 CANFD 1 1e3 Rx 1 0 d\n"
+            "base hex timestamps relative\ninternal events logged\n"
+            f"{good}\n{broken}\n{good}\n"
+        )
+        with self.assertLogs("can.io.asc", "WARNING") as logs:
+            with can.ASCReader(stream, relative_timestamp=False) as reader:
+                messages = list(reader)
+        self.assertEqual(len(messages), 2)
+        self.assertEqual([bytes(msg.data) for msg in messages], [b"\x01\x02"] * 2)
+        self.assertAlmostEqual(messages[-1].timestamp, final_timestamp)
+        self.assertEqual(len(logs.records), 1)
+        self.assertIn(broken, logs.records[0].getMessage())
+
+    def test_canfd_remote_record_uses_data_length(self):
+        stream = StringIO(
+            "base hex timestamps relative\ninternal events logged\n"
+            "0.100000 CANFD 1 Rx 123 0 0 8 0 0 0 10\n"
         )
         with can.ASCReader(stream) as reader:
-            with self.assertRaises(ValueError):
-                list(reader)
+            (message,) = reader
+        self.assertEqual(message.dlc, 8)
+        self.assertTrue(message.is_remote_frame)
+        self.assertEqual(message.data, b"")
 
     @parameterized.expand(
         [
